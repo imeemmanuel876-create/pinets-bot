@@ -95,4 +95,4 @@ async function checkSignals() {
 app.get('/', (req, res) => res.send('PineTS Bot is running!'));
 app.get('/check', async (req, res) => res.json(await checkSignals()));
 
-app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
+module.exports = app;
