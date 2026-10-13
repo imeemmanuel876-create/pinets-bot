@@ -1,0 +1,98 @@
+// app.js
+const express = require('express');
+const fetch = require('node-fetch');
+const { PineTS } = require('pinets');
+
+const app = express();
+const PORT = process.env.PORT || 8080;
+
+// These will be set as Environment Variables in Leapcell
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
+
+// ==============================================
+// PASTE YOUR FULL PINE SCRIPT V6 CODE HERE
+// ==============================================
+const PINE_SCRIPT = `
+//@version=6
+strategy("My Multi-Engine Strategy", overlay=true)
+// ... YOUR FULL STRATEGY CODE GOES HERE ...
+`;
+// ==============================================
+
+async function sendTelegramMessage(message) {
+    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
+    try {
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: message, parse_mode: 'HTML' })
+        });
+    } catch (error) {
+        console.error('Telegram Error:', error);
+    }
+}
+
+async function fetchCandles(symbol, interval, outputsize = 500) {
+    // Twelve Data uses symbols like 'EUR/USD' and intervals like '15min'
+    const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${TWELVE_DATA_API_KEY}&format=JSON`;
+    const response = await fetch(url);
+    const data = await response.json();
+
+    if (data.status === 'error') {
+        throw new Error(`Twelve Data Error: ${data.message}`);
+    }
+
+    // Twelve Data returns newest first, so we reverse it for PineTS
+    return data.values.reverse().map(v => ({
+        time: new Date(v.datetime).getTime(),
+        open: parseFloat(v.open),
+        high: parseFloat(v.high),
+        low: parseFloat(v.low),
+        close: parseFloat(v.close),
+        volume: parseFloat(v.volume || 0)
+    }));
+}
+
+async function checkSignals() {
+    try {
+        const SYMBOL = 'EUR/USD'; // Change to your pair
+        const INTERVAL = '15min';   // Change to your timeframe
+
+        const candles = await fetchCandles(SYMBOL, INTERVAL);
+        const pineTS = new PineTS(candles, SYMBOL, INTERVAL);
+
+        // This runs your Pine Script against the data
+        const { plots } = await pineTS.run(PINE_SCRIPT);
+
+        const alerts = [];
+        const lastIndex = candles.length - 1;
+
+        // ==========================================================
+        // ADAPT THIS SECTION: Check the 'plots' object for your
+        // signal names (the 'title' from your plotshape() calls).
+        // ==========================================================
+        if (plots['CRT BUY'] && plots['CRT BUY'].data[lastIndex] === 1) {
+            alerts.push(`🚀 <b>CRT BUY</b> on ${SYMBOL} (${INTERVAL})`);
+        }
+        if (plots['Manual SELL'] && plots['Manual SELL'].data[lastIndex] === 1) {
+            alerts.push(`🔻 <b>MANUAL SELL</b> on ${SYMBOL} (${INTERVAL})`);
+        }
+        // Add more checks for MSS, Trend Change, etc.
+        // ==========================================================
+
+        if (alerts.length > 0) {
+            for (const alert of alerts) await sendTelegramMessage(alert);
+        }
+        return { success: true, alerts };
+    } catch (error) {
+        console.error('Signal Check Failed:', error);
+        return { success: false, error: error.message };
+    }
+}
+
+app.get('/', (req, res) => res.send('PineTS Bot is running!'));
+app.get('/check', async (req, res) => res.json(await checkSignals()));
+
+app.listen(PORT, () => console.log(`Server listening on port ${PORT}`));
