@@ -445,4 +445,68 @@ async function checkTimeframe(pair, tf, provider) {
     for (const f of fired) {
       const msg = `${f.emoji} <b>${f.signal}</b>\n` +
                   `📊 ${pair.label} · <b>${tf.label}</b>\n` +
- 
+                  `💵 Price: ${currentPrice}\n` +
+                  `🕐 Bar: ${barTime}`;
+      await sendTelegram(msg);
+    }
+  }
+
+  return {
+    pair: pair.label,
+    timeframe: tf.label,
+    bar: barTime,
+    price: currentPrice,
+    signals_fired: fired.length,
+    signals: fired
+  };
+}
+
+async function runChecks(timeframes) {
+  const results = [];
+  const provider = new TwelveDataBatchProvider();
+
+  await provider.prefetch(PAIRS, timeframes);
+
+  for (const pair of PAIRS) {
+    for (const tf of timeframes) {
+      try {
+        results.push(await checkTimeframe(pair, tf, provider));
+      } catch (e) {
+        results.push({ pair: pair.label, timeframe: tf.label, error: e.message });
+      }
+    }
+  }
+  return results;
+}
+
+app.get('/', (req, res) => res.send('PineTS Bot is running!'));
+
+app.get('/check-fast', async (req, res) => {
+  res.json({ success: true, mode: 'fast', checked: await runChecks(FAST_TIMEFRAMES) });
+});
+
+app.get('/check-slow', async (req, res) => {
+  res.json({ success: true, mode: 'slow', checked: await runChecks(SLOW_TIMEFRAMES) });
+});
+
+app.get('/verify-pairs', async (req, res) => {
+  const out = [];
+  for (const pair of PAIRS) {
+    try {
+      const url = `https://api.twelvedata.com/time_series?symbol=${pair.symbol}&interval=15min&outputsize=3&apikey=${pair.apiKey}&timezone=UTC`;
+      const r = await fetch(url);
+      const d = await r.json();
+      out.push({
+        requested: pair.label,
+        twelveDataReturned: d.meta?.symbol || 'unknown',
+        match: pair.symbol === (d.meta?.symbol || ''),
+        latestClose: d.values?.[0]?.close
+      });
+    } catch (e) {
+      out.push({ requested: pair.label, error: e.message });
+    }
+  }
+  res.json(out);
+});
+
+module.exports = app;
