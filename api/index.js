@@ -26,15 +26,16 @@ const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
 const PINE_SCRIPT = `
 //@version=5
-strategy("Multi", overlay=true, calc_on_every_tick=false, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=1000000)
+strategy("CRT + TBS + Manual + BOS MSS FVG + MSS", overlay=true, calc_on_every_tick=false, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=1000000)
 
-crtTimeframe = "60"
+// ENGINE 1 — CRT + TBS
+crtTimeframe     = "60"
 maxBarsToReclaim = 12
-minBodyPercent = 0.30
+minBodyPercent   = 0.30
 crtHigh = request.security(syminfo.tickerid, crtTimeframe, high[1], lookahead=barmerge.lookahead_on)
-crtLow  = request.security(syminfo.tickerid, crtTimeframe, low[1], lookahead=barmerge.lookahead_on)
+crtLow  = request.security(syminfo.tickerid, crtTimeframe, low[1],  lookahead=barmerge.lookahead_on)
 crtHighChanged = ta.change(crtHigh)
-crtLowChanged = ta.change(crtLow)
+crtLowChanged  = ta.change(crtLow)
 newCRT = crtHighChanged != 0 or crtLowChanged != 0
 var int crtSweepState = 0
 var int crtSweepBar = na
@@ -42,7 +43,7 @@ if newCRT
     crtSweepState := 0
     crtSweepBar := na
 crtBodyBreakAbove = open > crtHigh and close > crtHigh
-crtBodyBreakBelow = open < crtLow and close < crtLow
+crtBodyBreakBelow = open < crtLow  and close < crtLow
 if crtBodyBreakAbove
     crtSweepState := 1
     crtSweepBar := bar_index
@@ -66,11 +67,10 @@ crtSellSignal = crtBearishTBS
 if crtBuySignal or crtSellSignal
     crtSweepState := 0
     crtSweepBar := na
-plotshape(crtBodyBreakBelow, "CRT Low Sweep", shape.triangledown, location.belowbar, color.orange, size=size.tiny, text="SWEEP")
-plotshape(crtBodyBreakAbove, "CRT High Sweep", shape.triangleup, location.abovebar, color.orange, size=size.tiny, text="SWEEP")
 plotshape(crtBuySignal, "CRT BUY", shape.labelup, location.belowbar, color.blue, text="CRT BUY", textcolor=color.white, size=size.small)
 plotshape(crtSellSignal, "CRT SELL", shape.labeldown, location.abovebar, color.fuchsia, text="CRT SELL", textcolor=color.white, size=size.small)
 
+// ENGINE 2 — MANUAL
 swingLookback = 12
 emaPeriod = 200
 minBodyPct = 0.30
@@ -101,6 +101,7 @@ if manualBuySignal or manualSellSignal
 plotshape(manualBuySignal, "Manual BUY", shape.labelup, location.belowbar, color.green, text="BUY", textcolor=color.white, size=size.small)
 plotshape(manualSellSignal, "Manual SELL", shape.labeldown, location.abovebar, color.red, text="SELL", textcolor=color.white, size=size.small)
 
+// ENGINE 3 — BOS + MSS + FVG
 structureSwing = 5
 structureATRLength = 14
 minimumFVGATR = 0.03
@@ -113,13 +114,17 @@ structurePivotHigh = ta.pivothigh(high, structureSwing, structureSwing)
 structurePivotLow = ta.pivotlow(low, structureSwing, structureSwing)
 var float structureHigh = na
 var float structureLow = na
+var int structureHighBar = na
+var int structureLowBar = na
 var bool highAlreadyBroken = false
 var bool lowAlreadyBroken = false
 if not na(structurePivotHigh)
     structureHigh := structurePivotHigh
+    structureHighBar := bar_index - structureSwing
     highAlreadyBroken := false
 if not na(structurePivotLow)
     structureLow := structurePivotLow
+    structureLowBar := bar_index - structureSwing
     lowAlreadyBroken := false
 bullishBreak = not na(structureHigh) and close > structureHigh and not highAlreadyBroken
 bearishBreak = not na(structureLow) and close < structureLow and not lowAlreadyBroken
@@ -148,20 +153,28 @@ bullishFVG = low > high[2] and (low - high[2]) >= structureATR * minimumFVGATR
 bearishFVG = high < low[2] and (low[2] - high) >= structureATR * minimumFVGATR
 var float bullFVGTop = na
 var float bullFVGBottom = na
+var int bullFVGBar = na
 var bool bullFVGActive = false
 if bullishFVG and bullishStructureActive
     bullFVGTop := low
     bullFVGBottom := high[2]
+    bullFVGBar := bar_index
     bullFVGActive := true
 var float bearFVGTop = na
 var float bearFVGBottom = na
+var int bearFVGBar = na
 var bool bearFVGActive = false
 if bearishFVG and bearishStructureActive
     bearFVGTop := low[2]
     bearFVGBottom := high
+    bearFVGBar := bar_index
     bearFVGActive := true
-bullishRetest = bullFVGActive and low <= bullFVGTop and high >= bullFVGBottom
-bearishRetest = bearFVGActive and high >= bearFVGBottom and low <= bearFVGTop
+if bullFVGActive and not na(bullFVGBar) and bar_index - bullFVGBar > fvgRetestWindow
+    bullFVGActive := false
+if bearFVGActive and not na(bearFVGBar) and bar_index - bearFVGBar > fvgRetestWindow
+    bearFVGActive := false
+bullishRetest = bullFVGActive and bar_index > bullFVGBar and low <= bullFVGTop and high >= bullFVGBottom
+bearishRetest = bearFVGActive and bar_index > bearFVGBar and high >= bearFVGBottom and low <= bearFVGTop
 retestRange = high - low
 retestBody = math.abs(close - open)
 retestBodyPct = retestRange > 0 ? retestBody / retestRange : 0.0
@@ -177,93 +190,22 @@ structureBuySignal = structureBuyRaw and not structureCooldownActive
 structureSellSignal = structureSellRaw and not structureCooldownActive
 if structureBuySignal or structureSellSignal
     lastStructureSignal := bar_index
-plotshape(bullishBOS, "Bullish BOS", shape.labelup, location.belowbar, color.blue, text="BOS", textcolor=color.white, size=size.tiny)
-plotshape(bearishBOS, "Bearish BOS", shape.labeldown, location.abovebar, color.red, text="BOS", textcolor=color.white, size=size.tiny)
-plotshape(bullishMSS, "Bullish MSS", shape.labelup, location.belowbar, color.aqua, text="MSS", textcolor=color.black, size=size.small)
-plotshape(bearishMSS, "Bearish MSS", shape.labeldown, location.abovebar, color.orange, text="MSS", textcolor=color.black, size=size.small)
-plotshape(bullishFVG, "Bullish FVG", shape.labelup, location.belowbar, color.blue, text="FVG", textcolor=color.white, size=size.tiny)
-plotshape(bearishFVG, "Bearish FVG", shape.labeldown, location.abovebar, color.red, text="FVG", textcolor=color.white, size=size.tiny)
+if structureBuySignal
+    bullFVGActive := false
+if structureSellSignal
+    bearFVGActive := false
 plotshape(structureBuySignal, "BOS MSS FVG BUY", shape.labelup, location.belowbar, color.purple, text="BUY", textcolor=color.white, size=size.small)
 plotshape(structureSellSignal, "BOS MSS FVG SELL", shape.labeldown, location.abovebar, color.orange, text="SELL", textcolor=color.white, size=size.small)
 
-tcSwingLength = 4
-tcLiquidityLookback = 12
-tcFastEMA = 20
-tcMidEMA = 50
-tcSlowEMA = 200
-tcATRLength = 14
-tcLiquidityBuffer = 0.05
-tcConfirmationBars = 2
-tcLiquidityWindow = 10
-tcCooldown = 5
-tcEMA20 = ta.ema(close, tcFastEMA)
-tcEMA50 = ta.ema(close, tcMidEMA)
-tcEMA200 = ta.ema(close, tcSlowEMA)
-tcATR = ta.atr(tcATRLength)
-tcBuffer = tcATR * tcLiquidityBuffer
-tcPivotHigh = ta.pivothigh(high, tcSwingLength, tcSwingLength)
-tcPivotLow = ta.pivotlow(low, tcSwingLength, tcSwingLength)
-var float tcSwingHigh = na
-var float tcSwingLow = na
-if not na(tcPivotHigh)
-    tcSwingHigh := tcPivotHigh
-if not na(tcPivotLow)
-    tcSwingLow := tcPivotLow
-tcRecentHigh = ta.highest(high, tcLiquidityLookback)[1]
-tcRecentLow = ta.lowest(low, tcLiquidityLookback)[1]
-tcBullishLiquiditySweep = not na(tcRecentLow) and low < tcRecentLow - tcBuffer and close > tcRecentLow
-tcBearishLiquiditySweep = not na(tcRecentHigh) and high > tcRecentHigh + tcBuffer and close < tcRecentHigh
-var int tcBullSweepBar = na
-var int tcBearSweepBar = na
-if tcBullishLiquiditySweep
-    tcBullSweepBar := bar_index
-if tcBearishLiquiditySweep
-    tcBearSweepBar := bar_index
-tcBullLiquidityActive = not na(tcBullSweepBar) and bar_index - tcBullSweepBar <= tcLiquidityWindow
-tcBearLiquidityActive = not na(tcBearSweepBar) and bar_index - tcBearSweepBar <= tcLiquidityWindow
-if not na(tcBullSweepBar) and bar_index - tcBullSweepBar > tcLiquidityWindow
-    tcBullSweepBar := na
-if not na(tcBearSweepBar) and bar_index - tcBearSweepBar > tcLiquidityWindow
-    tcBearSweepBar := na
-var int tcTrendState = 0
-tcBullTrend = close > tcEMA50 + tcBuffer and tcEMA20 > tcEMA50 and tcEMA50 > tcEMA200
-tcBearTrend = close < tcEMA50 - tcBuffer and tcEMA20 < tcEMA50 and tcEMA50 < tcEMA200
-if tcBullTrend
-    tcTrendState := 1
-if tcBearTrend
-    tcTrendState := -1
-tcBullishStructureBreak = tcBullLiquidityActive and not na(tcSwingHigh) and close > tcSwingHigh
-tcBearishStructureBreak = tcBearLiquidityActive and not na(tcSwingLow) and close < tcSwingLow
-tcBullMomentum = 0
-tcBearMomentum = 0
-for i = 0 to tcConfirmationBars - 1
-    if close[i] > tcEMA20[i]
-        tcBullMomentum += 1
-    if close[i] < tcEMA20[i]
-        tcBearMomentum += 1
-tcBullConfirmed = tcBullMomentum >= tcConfirmationBars
-tcBearConfirmed = tcBearMomentum >= tcConfirmationBars
-tcRange = high - low
-tcBody = math.abs(close - open)
-tcBodyPercent = tcRange > 0 ? tcBody / tcRange : 0.0
-tcBullCandle = close > open and tcBodyPercent >= 0.35
-tcBearCandle = close < open and tcBodyPercent >= 0.35
-tcBullishTrendChange = tcTrendState == -1 and tcBullishStructureBreak and tcBullConfirmed and tcBullCandle and close > tcEMA20 and barstate.isconfirmed
-tcBearishTrendChange = tcTrendState == 1 and tcBearishStructureBreak and tcBearConfirmed and tcBearCandle and close < tcEMA20 and barstate.isconfirmed
-var int tcLastSignalBar = na
-tcCooldownActive = not na(tcLastSignalBar) and bar_index - tcLastSignalBar <= tcCooldown
-tcTrendBuySignal = tcBullishTrendChange and not tcCooldownActive
-tcTrendSellSignal = tcBearishTrendChange and not tcCooldownActive
-if tcTrendBuySignal or tcTrendSellSignal
-    tcLastSignalBar := bar_index
-if tcTrendBuySignal
-    tcBullSweepBar := na
-if tcTrendSellSignal
-    tcBearSweepBar := na
-plotshape(tcBullishLiquiditySweep, "Liq Bull Sweep", shape.labelup, location.belowbar, color=color.new(color.green, 0), text="LIQ BULL", textcolor=color.white, size=size.small)
-plotshape(tcBearishLiquiditySweep, "Liq Bear Sweep", shape.labeldown, location.abovebar, color=color.new(color.red, 0), text="LIQ BEAR", textcolor=color.white, size=size.small)
-plotshape(tcTrendBuySignal, "Trend BUY", shape.labelup, location.belowbar, color.yellow, text="TREND BUY", textcolor=color.black, size=size.small)
-plotshape(tcTrendSellSignal, "Trend SELL", shape.labeldown, location.abovebar, color.aqua, text="TREND SELL", textcolor=color.black, size=size.small)
+// STANDALONE MSS — fires on structure shift, no FVG needed
+var int lastMssSig = na
+mssCooldownActive = not na(lastMssSig) and bar_index - lastMssSig <= 3
+mssBuySignal = bullishMSS and not mssCooldownActive and barstate.isconfirmed
+mssSellSignal = bearishMSS and not mssCooldownActive and barstate.isconfirmed
+if mssBuySignal or mssSellSignal
+    lastMssSig := bar_index
+plotshape(mssBuySignal, "MSS BUY", shape.labelup, location.belowbar, color.aqua, text="MSS BUY", textcolor=color.black, size=size.small)
+plotshape(mssSellSignal, "MSS SELL", shape.labeldown, location.abovebar, color.orange, text="MSS SELL", textcolor=color.black, size=size.small)
 `;
 
 const SIGNALS = {
@@ -271,18 +213,10 @@ const SIGNALS = {
   "CRT SELL":         { label: "CRT SELL",             emoji: "🟪" },
   "Manual BUY":       { label: "MANUAL BUY",           emoji: "🟢" },
   "Manual SELL":      { label: "MANUAL SELL",          emoji: "🔴" },
-  "Bullish BOS":      { label: "BOS BULLISH",          emoji: "🔵" },
-  "Bearish BOS":      { label: "BOS BEARISH",          emoji: "🔻" },
-  "Bullish MSS":      { label: "MSS BULLISH",          emoji: "🩵" },
-  "Bearish MSS":      { label: "MSS BEARISH",          emoji: "🟠" },
-  "Bullish FVG":      { label: "FVG BULLISH",          emoji: "📘" },
-  "Bearish FVG":      { label: "FVG BEARISH",          emoji: "📕" },
   "BOS MSS FVG BUY":  { label: "STRUCTURE BUY",        emoji: "🟣" },
   "BOS MSS FVG SELL": { label: "STRUCTURE SELL",       emoji: "🟠" },
-  "Liq Bull Sweep":   { label: "LIQUIDITY BULL SWEEP", emoji: "💧" },
-  "Liq Bear Sweep":   { label: "LIQUIDITY BEAR SWEEP", emoji: "💧" },
-  "Trend BUY":        { label: "TREND BUY",            emoji: "🟡" },
-  "Trend SELL":       { label: "TREND SELL",           emoji: "🌊" },
+  "MSS BUY":          { label: "MSS BUY",              emoji: "🩵" },
+  "MSS SELL":         { label: "MSS SELL",             emoji: "🟧" },
 };
 
 const alertedBars = {};
@@ -335,7 +269,6 @@ async function checkPair(pair, timeframes) {
 
   // Prefetch H1 once (CRT uses it for every chart timeframe)
   try { await provider.fetchInterval('1h'); } catch (e) {}
-  await sleep(8000);
 
   const { PineTS } = require('pinets');
   const results = [];
