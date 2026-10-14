@@ -15,15 +15,15 @@ strategy("CRT + TBS + Manual + BOS MSS FVG + Trend - Full Strategy", overlay=tru
 //====================================================
 // ENGINE 1 — CRT + TBS
 //====================================================
-crtTimeframe      = input.timeframe("60", "CRT Timeframe")
+crtTimeframe      = "60"
 maxBarsToReclaim  = input.int(12, "Max Bars For TBS Reclaim", minval=1, maxval=100)
 minBodyPercent    = input.float(0.30, "Minimum Reclaim Body %", minval=0.0, maxval=1.0, step=0.05)
 showMidpoint      = input.bool(true, "Show CRT Midpoint")
 showCRTSignals    = input.bool(true, "Show CRT Signals")
 showSweepMarkers  = input.bool(true, "Show Sweep Markers")
 
-crtHigh = request.security(syminfo.tickerid, crtTimeframe, high[1], lookahead=barmerge.lookahead_on)
-crtLow  = request.security(syminfo.tickerid, crtTimeframe, low[1],  lookahead=barmerge.lookahead_on)
+crtHigh = request.security("EUR/USD", crtTimeframe, high[1], lookahead=barmerge.lookahead_on)
+crtLow  = request.security("EUR/USD", crtTimeframe, low[1],  lookahead=barmerge.lookahead_on)
 crtMid  = (crtHigh + crtLow) / 2
 
 plot(crtHigh, "CRT High", color=color.red,  linewidth=2)
