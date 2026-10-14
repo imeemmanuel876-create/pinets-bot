@@ -466,4 +466,74 @@ async function checkTimeframe(tf) {
   const result = await pine.run(PINE_SCRIPT);
 
   const checkIdx = candles.length - 2;
+  const currentPrice = candles[checkIdx].close;
+  const barTime = new Date(candles[checkIdx].time).toISOString();
+
+  if (alertedBars[tf.label] === barTime) {
+    return { timeframe: tf.label, skipped: true, bar: barTime };
+  }
+
+  const fired = [];
+  for (const [plotName, meta] of Object.entries(SIGNALS)) {
+    const data = result.plots[plotName]?.data;
+    if (!Array.isArray(data) || data.length < 2) continue;
+    const last = data[checkIdx];
+    const value = (last && typeof last === 'object') ? last.value : last;
+    if (value === true) {
+      fired.push({ signal: meta.label, emoji: meta.emoji });
+    }
+  }
+
+  if (fired.length > 0) {
+    alertedBars[tf.label] = barTime;
+    for (const f of fired) {
+      const msg = `${f.emoji} <b>${f.signal}</b>\n` +
+                  `📊 ${SYMBOL} · <b>${tf.label}</b>\n` +
+                  `💵 Price: ${currentPrice}\n` +
+                  `🕐 Bar: ${barTime}`;
+      await sendTelegram(msg);
+    }
+  }
+
+  return {
+    timeframe: tf.label,
+    bar: barTime,
+    price: currentPrice,
+    signals_fired: fired.length,
+    signals: fired
+  };
+}
+
+async function runChecks(timeframes) {
+  const results = [];
+  for (const tf of timeframes) {
+    try {
+      const r = await checkTimeframe(tf);
+      results.push(r);
+    } catch (e) {
+      results.push({ timeframe: tf.label, error: e.message });
+    }
+  }
+  return results;
+}
+
+app.get('/', (req, res) => res.send('PineTS Bot is running!'));
+
+app.get('/check-fast', async (req, res) => {
+  const results = await runChecks(FAST_TIMEFRAMES);
+  res.json({ success: true, mode: 'fast', checked: results });
+});
+
+app.get('/check-slow', async (req, res) => {
+  const results = await runChecks(SLOW_TIMEFRAMES);
+  res.json({ success: true, mode: 'slow', checked: results });
+});
+
+app.get('/check', async (req, res) => {
+  const all = [...FAST_TIMEFRAMES, ...SLOW_TIMEFRAMES];
+  const results = await runChecks(all);
+  res.json({ success: true, mode: 'all', checked: results });
+});
+
+module.exports = app;
   
