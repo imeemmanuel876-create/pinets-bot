@@ -464,4 +464,59 @@ async function checkTimeframe(tf) {
   const pine = new PineTS(candles);
   const result = await pine.run(PINE_SCRIPT);
 
-  const ch
+  const checkIdx = candles.length - 2;
+  const currentPrice = candles[checkIdx].close;
+  const barTime = new Date(candles[checkIdx].time).toISOString();
+
+  // Dedup per timeframe
+  if (alertedBars[tf.label] === barTime) {
+    return { timeframe: tf.label, skipped: true, bar: barTime };
+  }
+
+  const fired = [];
+  for (const [plotName, meta] of Object.entries(SIGNALS)) {
+    const data = result.plots[plotName]?.data;
+    if (!Array.isArray(data) || data.length < 2) continue;
+    const last = data[checkIdx];
+    const value = (last && typeof last === 'object') ? last.value : last;
+    if (value === true) {
+      fired.push({ signal: meta.label, emoji: meta.emoji });
+    }
+  }
+
+  if (fired.length > 0) {
+    alertedBars[tf.label] = barTime;
+    for (const f of fired) {
+      const msg = `${f.emoji} <b>${f.signal}</b>\n` +
+                  `📊 ${SYMBOL} · <b>${tf.label}</b>\n` +
+                  `💵 Price: ${currentPrice}\n` +
+                  `🕐 Bar: ${barTime}`;
+      await sendTelegram(msg);
+    }
+  }
+
+  return {
+    timeframe: tf.label,
+    bar: barTime,
+    price: currentPrice,
+    signals_fired: fired.length,
+    signals: fired
+  };
+}
+
+app.get('/', (req, res) => res.send('PineTS Bot is running!'));
+
+app.get('/check', async (req, res) => {
+  const results = [];
+  for (const tf of TIMEFRAMES) {
+    try {
+      const r = await checkTimeframe(tf);
+      results.push(r);
+    } catch (e) {
+      results.push({ timeframe: tf.label, error: e.message });
+    }
+  }
+  res.json({ success: true, checked: results });
+});
+
+module.exports = app;
