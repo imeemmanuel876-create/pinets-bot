@@ -5,11 +5,22 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
+// ============================================================
+// CONFIGURATION
+// ============================================================
 const SYMBOL = 'EUR/USD';
-const INTERVAL = '15min';
+
+// All timeframes to monitor. Twelve Data interval names + display labels.
+const TIMEFRAMES = [
+  { td: '15min', label: '15m' },
+  { td: '45min', label: '45m' },
+  { td: '1h',    label: '1H'  },
+  { td: '2h',    label: '2H'  },
+  { td: '4h',    label: '4H'  },
+];
 
 // ============================================================
-// YOUR PINE SCRIPT v5 — FULLY INTEGRATED
+// YOUR PINE SCRIPT v5
 // ============================================================
 const PINE_SCRIPT = `
 //@version=5
@@ -401,6 +412,28 @@ plotshape(tcTrendSellSignal, "Trend SELL", shape.labeldown, location.abovebar, c
 `;
 // ============================================================
 
+const SIGNALS = {
+  "CRT BUY":            { label: "CRT BUY",              emoji: "🟦" },
+  "CRT SELL":           { label: "CRT SELL",             emoji: "🟪" },
+  "Manual BUY":         { label: "MANUAL BUY",           emoji: "🟢" },
+  "Manual SELL":        { label: "MANUAL SELL",          emoji: "🔴" },
+  "Bullish BOS":        { label: "BOS BULLISH",          emoji: "🔵" },
+  "Bearish BOS":        { label: "BOS BEARISH",          emoji: "🔻" },
+  "Bullish MSS":        { label: "MSS BULLISH",          emoji: "🩵" },
+  "Bearish MSS":        { label: "MSS BEARISH",          emoji: "🟠" },
+  "Bullish FVG":        { label: "FVG BULLISH",          emoji: "📘" },
+  "Bearish FVG":        { label: "FVG BEARISH",          emoji: "📕" },
+  "BOS MSS FVG BUY":    { label: "STRUCTURE BUY",        emoji: "🟣" },
+  "BOS MSS FVG SELL":   { label: "STRUCTURE SELL",       emoji: "🟠" },
+  "Liq Bull Sweep":     { label: "LIQUIDITY BULL SWEEP", emoji: "💧" },
+  "Liq Bear Sweep":     { label: "LIQUIDITY BEAR SWEEP", emoji: "💧" },
+  "Trend BUY":          { label: "TREND BUY",            emoji: "🟡" },
+  "Trend SELL":         { label: "TREND SELL",           emoji: "🌊" },
+};
+
+// In-memory dedup per timeframe (resets on cold start)
+const alertedBars = {};
+
 async function fetchCandles(symbol, interval, outputsize = 500) {
   const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${TWELVE_DATA_API_KEY}`;
   const response = await fetch(url);
@@ -425,97 +458,10 @@ async function sendTelegram(message) {
   });
 }
 
-app.get('/', (req, res) => res.send('PineTS Bot is running!'));
+async function checkTimeframe(tf) {
+  const candles = await fetchCandles(SYMBOL, tf.td, 500);
+  const { PineTS } = require('pinets');
+  const pine = new PineTS(candles);
+  const result = await pine.run(PINE_SCRIPT);
 
-// ---- INSPECT: diagnostic endpoint ----
-app.get('/inspect', async (req, res) => {
-  try {
-    const candles = await fetchCandles(SYMBOL, INTERVAL, 500);
-    const { PineTS } = require('pinets');
-    const pine = new PineTS(candles);
-    const result = await pine.run(PINE_SCRIPT);
-
-    const plotNames = Object.keys(result.plots || {});
-    const lastBarValues = {};
-    for (const name of plotNames) {
-      const data = result.plots[name]?.data;
-      if (Array.isArray(data) && data.length > 0) {
-        const last = data[data.length - 1];
-        lastBarValues[name] = (last && typeof last === 'object') ? last.value : last;
-      }
-    }
-    res.json({ candle_count: candles.length, plot_names: plotNames, last_bar_values: lastBarValues });
-  } catch (e) {
-    res.json({ error: e.message, stack: e.stack });
-  }
-});
-
-// ---- CHECK: main signal scanner & Telegram alerter ----
-app.get('/check', async (req, res) => {
-  try {
-    const candles = await fetchCandles(SYMBOL, INTERVAL, 500);
-    const { PineTS } = require('pinets');
-    const pine = new PineTS(candles);
-    const result = await pine.run(PINE_SCRIPT);
-
-    // Check the last CLOSED bar (index length-2, since length-1 is still forming)
-    const checkIdx = candles.length - 2;
-    const currentPrice = candles[checkIdx].close;
-    const barTime = new Date(candles[checkIdx].time).toISOString();
-
-    const SIGNALS = {
-      "CRT BUY":            { label: "CRT BUY",              emoji: "🟦" },
-      "CRT SELL":           { label: "CRT SELL",             emoji: "🟪" },
-      "Manual BUY":         { label: "MANUAL BUY",           emoji: "🟢" },
-      "Manual SELL":        { label: "MANUAL SELL",          emoji: "🔴" },
-      "Bullish BOS":        { label: "BOS BULLISH",          emoji: "🔵" },
-      "Bearish BOS":        { label: "BOS BEARISH",          emoji: "🔻" },
-      "Bullish MSS":        { label: "MSS BULLISH",          emoji: "🩵" },
-      "Bearish MSS":        { label: "MSS BEARISH",          emoji: "🟠" },
-      "Bullish FVG":        { label: "FVG BULLISH",          emoji: "📘" },
-      "Bearish FVG":        { label: "FVG BEARISH",          emoji: "📕" },
-      "BOS MSS FVG BUY":    { label: "STRUCTURE BUY",        emoji: "🟣" },
-      "BOS MSS FVG SELL":   { label: "STRUCTURE SELL",       emoji: "🟠" },
-      "Liq Bull Sweep":     { label: "LIQUIDITY BULL SWEEP", emoji: "💧" },
-      "Liq Bear Sweep":     { label: "LIQUIDITY BEAR SWEEP", emoji: "💧" },
-      "Trend BUY":          { label: "TREND BUY",            emoji: "🟡" },
-      "Trend SELL":         { label: "TREND SELL",           emoji: "🌊" },
-    };
-
-    const fired = [];
-    for (const [plotName, meta] of Object.entries(SIGNALS)) {
-      const data = result.plots[plotName]?.data;
-      if (!Array.isArray(data) || data.length < 2) continue;
-      const last = data[checkIdx];
-      const value = (last && typeof last === 'object') ? last.value : last;
-      if (value === true) {
-        fired.push({
-          signal: meta.label,
-          emoji: meta.emoji,
-          barTime,
-          price: currentPrice
-        });
-      }
-    }
-
-    for (const f of fired) {
-      const msg = `${f.emoji} <b>${f.signal}</b>\n` +
-                  `📊 ${SYMBOL} · ${INTERVAL}\n` +
-                  `💵 Price: ${f.price}\n` +
-                  `🕐 Bar: ${f.barTime}`;
-      await sendTelegram(msg);
-    }
-
-    res.json({
-      success: true,
-      checked_bar: barTime,
-      price: currentPrice,
-      signals_fired: fired.length,
-      signals: fired
-    });
-  } catch (e) {
-    res.json({ error: e.message });
-  }
-});
-
-module.exports = app;
+  const ch
