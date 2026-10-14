@@ -5,6 +5,9 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
+const SYMBOL = 'EUR/USD';
+const INTERVAL = '15min';
+
 // ============================================================
 // YOUR PINE SCRIPT v5 — FULLY INTEGRATED
 // ============================================================
@@ -21,8 +24,6 @@ showMidpoint      = true
 showCRTSignals    = true
 showSweepMarkers  = true
 
-// Manual CRT calculation: find the previous completed H1 candle's high/low
-// using the 15-min chart data (4 bars per hour)
 var float crtHigh = na
 var float crtLow  = na
 var float crtMid  = na
@@ -31,7 +32,6 @@ var int   crtHour = na
 currentHour = hour(time)
 
 if na(crtHour) or currentHour != crtHour
-    // New hour started — store the previous hour's range
     float prevHigh = na
     float prevLow  = na
     int count = 0
@@ -427,10 +427,10 @@ async function sendTelegram(message) {
 
 app.get('/', (req, res) => res.send('PineTS Bot is running!'));
 
-// Diagnostic: shows what plots PineTS produces from your script
+// ---- INSPECT: diagnostic endpoint ----
 app.get('/inspect', async (req, res) => {
   try {
-    const candles = await fetchCandles('EUR/USD', '15min', 500);
+    const candles = await fetchCandles(SYMBOL, INTERVAL, 500);
     const { PineTS } = require('pinets');
     const pine = new PineTS(candles);
     const result = await pine.run(PINE_SCRIPT);
@@ -447,6 +447,74 @@ app.get('/inspect', async (req, res) => {
     res.json({ candle_count: candles.length, plot_names: plotNames, last_bar_values: lastBarValues });
   } catch (e) {
     res.json({ error: e.message, stack: e.stack });
+  }
+});
+
+// ---- CHECK: main signal scanner & Telegram alerter ----
+app.get('/check', async (req, res) => {
+  try {
+    const candles = await fetchCandles(SYMBOL, INTERVAL, 500);
+    const { PineTS } = require('pinets');
+    const pine = new PineTS(candles);
+    const result = await pine.run(PINE_SCRIPT);
+
+    // Check the last CLOSED bar (index length-2, since length-1 is still forming)
+    const checkIdx = candles.length - 2;
+    const currentPrice = candles[checkIdx].close;
+    const barTime = new Date(candles[checkIdx].time).toISOString();
+
+    const SIGNALS = {
+      "CRT BUY":            { label: "CRT BUY",              emoji: "🟦" },
+      "CRT SELL":           { label: "CRT SELL",             emoji: "🟪" },
+      "Manual BUY":         { label: "MANUAL BUY",           emoji: "🟢" },
+      "Manual SELL":        { label: "MANUAL SELL",          emoji: "🔴" },
+      "Bullish BOS":        { label: "BOS BULLISH",          emoji: "🔵" },
+      "Bearish BOS":        { label: "BOS BEARISH",          emoji: "🔻" },
+      "Bullish MSS":        { label: "MSS BULLISH",          emoji: "🩵" },
+      "Bearish MSS":        { label: "MSS BEARISH",          emoji: "🟠" },
+      "Bullish FVG":        { label: "FVG BULLISH",          emoji: "📘" },
+      "Bearish FVG":        { label: "FVG BEARISH",          emoji: "📕" },
+      "BOS MSS FVG BUY":    { label: "STRUCTURE BUY",        emoji: "🟣" },
+      "BOS MSS FVG SELL":   { label: "STRUCTURE SELL",       emoji: "🟠" },
+      "Liq Bull Sweep":     { label: "LIQUIDITY BULL SWEEP", emoji: "💧" },
+      "Liq Bear Sweep":     { label: "LIQUIDITY BEAR SWEEP", emoji: "💧" },
+      "Trend BUY":          { label: "TREND BUY",            emoji: "🟡" },
+      "Trend SELL":         { label: "TREND SELL",           emoji: "🌊" },
+    };
+
+    const fired = [];
+    for (const [plotName, meta] of Object.entries(SIGNALS)) {
+      const data = result.plots[plotName]?.data;
+      if (!Array.isArray(data) || data.length < 2) continue;
+      const last = data[checkIdx];
+      const value = (last && typeof last === 'object') ? last.value : last;
+      if (value === true) {
+        fired.push({
+          signal: meta.label,
+          emoji: meta.emoji,
+          barTime,
+          price: currentPrice
+        });
+      }
+    }
+
+    for (const f of fired) {
+      const msg = `${f.emoji} <b>${f.signal}</b>\n` +
+                  `📊 ${SYMBOL} · ${INTERVAL}\n` +
+                  `💵 Price: ${f.price}\n` +
+                  `🕐 Bar: ${f.barTime}`;
+      await sendTelegram(msg);
+    }
+
+    res.json({
+      success: true,
+      checked_bar: barTime,
+      price: currentPrice,
+      signals_fired: fired.length,
+      signals: fired
+    });
+  } catch (e) {
+    res.json({ error: e.message });
   }
 });
 
