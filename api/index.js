@@ -20,21 +20,20 @@ const SLOW_TIMEFRAMES = [
   { pine: '240', label: '4H'  },
 ];
 
-// Map PineTS timeframe codes to Twelve Data interval names
 const PINE_TO_TWELVE = {
   '5': '5min', '15': '15min', '45': '45min', '60': '1h', '120': '2h', '240': '4h',
 };
 
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ============================================================
 // BATCH DATA PROVIDER
-// Fetches data for multiple symbols & intervals in a single POST
 // ============================================================
 class TwelveDataBatchProvider {
   constructor() {
-    this.cache = {}; // keyed by `${symbol}|${interval}`
+    this.cache = {};
   }
 
-  // Prefetch all symbol/interval combinations in one or two batches
   async prefetch(pairs, timeframes) {
     const requests = [];
     for (const pair of pairs) {
@@ -51,14 +50,11 @@ class TwelveDataBatchProvider {
       }
     }
 
-    // Split into batches of 5 to stay under the 8 credits/min limit
-    const BATCH_SIZE = 5;
+    const BATCH_SIZE = 3;
     for (let i = 0; i < requests.length; i += BATCH_SIZE) {
       const batch = requests.slice(i, i + BATCH_SIZE);
-      if (i > 0) await sleep(8000); // rate-limit pause between batches
+      if (i > 0) await sleep(20000);
 
-      // Group by api key (the batch endpoint requires a single key in the header)
-      // Since we have two keys, we send one batch per key group.
       const groups = {};
       for (const req of batch) {
         if (!groups[req.apiKey]) groups[req.apiKey] = [];
@@ -66,27 +62,34 @@ class TwelveDataBatchProvider {
       }
 
       for (const [apiKey, group] of Object.entries(groups)) {
-        if (group.length === 0) continue;
         const body = {};
         for (const req of group) {
           body[req.id] = { url: req.url };
         }
 
-        const response = await fetch('https://api.twelvedata.com/batch', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `apikey ${apiKey}`,
-          },
-          body: JSON.stringify(body),
-        });
-
-        const data = await response.json();
-        if (data.code !== 200) {
-          throw new Error(`Batch request failed: ${data.message || data.status}`);
+        let attempt = 0;
+        let data = null;
+        while (attempt < 3) {
+          const response = await fetch('https://api.twelvedata.com/batch', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `apikey ${apiKey}`,
+            },
+            body: JSON.stringify(body),
+          });
+          data = await response.json();
+          if (data.code === 200) break;
+          if (data.message && data.message.includes('API credits')) {
+            await sleep(20000);
+            attempt++;
+          } else {
+            break;
+          }
         }
 
-        // Parse each sub-response and store in cache
+        if (!data || data.code !== 200) continue;
+
         for (const [id, result] of Object.entries(data.data || {})) {
           if (result.status !== 'success' || !result.response) continue;
           const candles = (result.response.values || []).reverse().map(v => ({
@@ -97,7 +100,6 @@ class TwelveDataBatchProvider {
             close: parseFloat(v.close),
             volume: parseFloat(v.volume || 0),
           }));
-          // Map id back to symbol|interval
           const req = requests.find(r => r.id === id);
           if (req) {
             this.cache[`${req.symbol}|${req.interval}`] = candles;
@@ -107,12 +109,10 @@ class TwelveDataBatchProvider {
     }
   }
 
-  // Called by PineTS for each symbol/timeframe it needs
   async getMarketData(tickerId, timeframe, limit = 500) {
     const interval = PINE_TO_TWELVE[String(timeframe)] || String(timeframe);
     const key = `${tickerId}|${interval}`;
     if (this.cache[key]) return this.cache[key];
-    // Fallback: direct request if not prefetched
     const url = `https://api.twelvedata.com/time_series?symbol=${tickerId}&interval=${interval}&outputsize=${limit}&apikey=${TWELVE_DATA_API_KEY}&timezone=UTC`;
     const r = await fetch(url);
     const d = await r.json();
@@ -132,9 +132,6 @@ class TwelveDataBatchProvider {
 
   configure(config) {}
 }
-
-// Helper
-const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 // ============================================================
 // PINE SCRIPT v5 (your exact original logic)
@@ -448,70 +445,4 @@ async function checkTimeframe(pair, tf, provider) {
     for (const f of fired) {
       const msg = `${f.emoji} <b>${f.signal}</b>\n` +
                   `📊 ${pair.label} · <b>${tf.label}</b>\n` +
-                  `💵 Price: ${currentPrice}\n` +
-                  `🕐 Bar: ${barTime}`;
-      await sendTelegram(msg);
-    }
-  }
-
-  return {
-    pair: pair.label,
-    timeframe: tf.label,
-    bar: barTime,
-    price: currentPrice,
-    signals_fired: fired.length,
-    signals: fired
-  };
-}
-
-async function runChecks(timeframes) {
-  const results = [];
-  const provider = new TwelveDataBatchProvider();
-
-  // Prefetch all data in batched requests (2 batches of 5)
-  await provider.prefetch(PAIRS, timeframes);
-
-  // Now run each timeframe using the cached data
-  for (const pair of PAIRS) {
-    for (const tf of timeframes) {
-      try {
-        results.push(await checkTimeframe(pair, tf, provider));
-      } catch (e) {
-        results.push({ pair: pair.label, timeframe: tf.label, error: e.message });
-      }
-    }
-  }
-  return results;
-}
-
-app.get('/', (req, res) => res.send('PineTS Bot is running!'));
-
-app.get('/check-fast', async (req, res) => {
-  res.json({ success: true, mode: 'fast', checked: await runChecks(FAST_TIMEFRAMES) });
-});
-
-app.get('/check-slow', async (req, res) => {
-  res.json({ success: true, mode: 'slow', checked: await runChecks(SLOW_TIMEFRAMES) });
-});
-
-app.get('/verify-pairs', async (req, res) => {
-  const out = [];
-  for (const pair of PAIRS) {
-    try {
-      const url = `https://api.twelvedata.com/time_series?symbol=${pair.symbol}&interval=15min&outputsize=3&apikey=${pair.apiKey}&timezone=UTC`;
-      const r = await fetch(url);
-      const d = await r.json();
-      out.push({
-        requested: pair.label,
-        twelveDataReturned: d.meta?.symbol || 'unknown',
-        match: pair.symbol === (d.meta?.symbol || ''),
-        latestClose: d.values?.[0]?.close
-      });
-    } catch (e) {
-      out.push({ requested: pair.label, error: e.message });
-    }
-  }
-  res.json(out);
-});
-
-module.exports = app;
+ 
