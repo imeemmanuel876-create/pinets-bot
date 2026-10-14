@@ -15,15 +15,36 @@ strategy("CRT + TBS + Manual + BOS MSS FVG + Trend - Full Strategy", overlay=tru
 //====================================================
 // ENGINE 1 — CRT + TBS
 //====================================================
-maxBarsToReclaim  = input.int(12, "Max Bars For TBS Reclaim", minval=1, maxval=100)
-minBodyPercent    = input.float(0.30, "Minimum Reclaim Body %", minval=0.0, maxval=1.0, step=0.05)
-showMidpoint      = input.bool(true, "Show CRT Midpoint")
-showCRTSignals    = input.bool(true, "Show CRT Signals")
-showSweepMarkers  = input.bool(true, "Show Sweep Markers")
+maxBarsToReclaim  = 12
+minBodyPercent    = 0.30
+showMidpoint      = true
+showCRTSignals    = true
+showSweepMarkers  = true
 
-crtHigh = request.security("EUR/USD", "60", high[1], lookahead=barmerge.lookahead_on)
-crtLow  = request.security("EUR/USD", "60", low[1],  lookahead=barmerge.lookahead_on)
-crtMid  = (crtHigh + crtLow) / 2
+// Manual CRT calculation: find the previous completed H1 candle's high/low
+// using the 15-min chart data (4 bars per hour)
+var float crtHigh = na
+var float crtLow  = na
+var float crtMid  = na
+var int   crtHour = na
+
+currentHour = hour(time)
+
+if na(crtHour) or currentHour != crtHour
+    // New hour started — store the previous hour's range
+    float prevHigh = na
+    float prevLow  = na
+    int count = 0
+    for i = 1 to 4
+        if i < bar_index
+            prevHigh := na(prevHigh) ? high[i] : math.max(prevHigh, high[i])
+            prevLow  := na(prevLow)  ? low[i]  : math.min(prevLow,  low[i])
+            count += 1
+    if count == 4
+        crtHigh := prevHigh
+        crtLow  := prevLow
+        crtMid  := (crtHigh + crtLow) / 2
+    crtHour := currentHour
 
 plot(crtHigh, "CRT High", color=color.red,  linewidth=2)
 plot(crtLow,  "CRT Low",  color=color.lime, linewidth=2)
