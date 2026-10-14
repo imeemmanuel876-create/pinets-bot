@@ -11,17 +11,32 @@ const PAIRS = [
   { symbol: 'EUR/CAD', label: 'EUR/CAD', apiKey: TWELVE_DATA_API_KEY_2 },
 ];
 
-const FAST_TIMEFRAMES = [{ td: '5min', label: '5m' }];
+// Map PineTS timeframe codes to Twelve Data interval names
+// PineTS expects: '1','5','15','30','45','60','120','240'
+// Twelve Data expects: '1min','5min','15min','30min','45min','1h','2h','4h'
+const PINE_TO_TWELVE = {
+  '1': '1min', '5': '5min', '15': '15min', '30': '30min',
+  '45': '45min', '60': '1h', '120': '2h', '240': '4h',
+};
+
+// Reverse mapping — used when PineTS asks for a timeframe inside request.security
+const TWELVE_TO_PINE = {
+  '1min': '1', '5min': '5', '15min': '15', '30min': '30',
+  '45min': '45', '1h': '60', '2h': '120', '4h': '240',
+};
+
+// The timeframes we want to monitor (in PineTS format)
+const FAST_TIMEFRAMES = [{ pine: '5', label: '5m' }];
 const SLOW_TIMEFRAMES = [
-  { td: '15min', label: '15m' },
-  { td: '45min', label: '45m' },
-  { td: '1h',    label: '1H'  },
-  { td: '2h',    label: '2H'  },
-  { td: '4h',    label: '4H'  },
+  { pine: '15',  label: '15m' },
+  { pine: '45',  label: '45m' },
+  { pine: '60',  label: '1H'  },
+  { pine: '120', label: '2H'  },
+  { pine: '240', label: '4H'  },
 ];
 
 // ============================================================
-// CUSTOM TWELVE DATA PROVIDER (enables request.security in PineTS)
+// CUSTOM PROVIDER (bridges Twelve Data to PineTS)
 // ============================================================
 class TwelveDataProvider {
   constructor(apiKey) {
@@ -29,25 +44,19 @@ class TwelveDataProvider {
     this.cache = {};
   }
 
-  mapTimeframe(tf) {
-    const map = {
-      '1': '1min', '5': '5min', '15': '15min', '30': '30min',
-      '45': '45min', '60': '1h', '120': '2h', '240': '4h',
-      '1h': '1h', '2h': '2h', '4h': '4h',
-      '5min': '5min', '15min': '15min', '45min': '45min',
-    };
-    return map[String(tf)] || String(tf);
-  }
-
   async getMarketData(tickerId, timeframe, limit = 500) {
-    const interval = this.mapTimeframe(timeframe);
-    const cacheKey = `${tickerId}|${interval}|${limit}`;
+    // PineTS passes a Pine timeframe string — convert it to Twelve Data format
+    const tdInterval = PINE_TO_TWELVE[String(timeframe)] || String(timeframe);
+    const cacheKey = `${tickerId}|${tdInterval}|${limit}`;
     if (this.cache[cacheKey]) return this.cache[cacheKey];
 
-    const url = `https://api.twelvedata.com/time_series?symbol=${tickerId}&interval=${interval}&outputsize=${limit}&apikey=${this.apiKey}&timezone=UTC`;
+    const url = `https://api.twelvedata.com/time_series?symbol=${tickerId}&interval=${tdInterval}&outputsize=${limit}&apikey=${this.apiKey}&timezone=UTC`;
     const response = await fetch(url);
     const data = await response.json();
-    if (data.status === 'error') throw new Error(data.message);
+
+    if (data.status === 'error') {
+      throw new Error(`Twelve Data (${tickerId} @ ${tdInterval}): ${data.message}`);
+    }
 
     const candles = data.values.reverse().map(v => ({
       time: new Date(v.datetime + 'Z').getTime(),
@@ -78,7 +87,7 @@ class TwelveDataProvider {
 }
 
 // ============================================================
-// PINE SCRIPT v5 — EXACT ORIGINAL LOGIC, CRT USES request.security
+// PINE SCRIPT v5 (your exact original logic)
 // ============================================================
 const PINE_SCRIPT = `
 //@version=5
@@ -403,6 +412,9 @@ const SIGNALS = {
 
 const alertedBars = {};
 
+// Helper to pause between API calls
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function sendTelegram(message) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
   await fetch(url, {
@@ -415,7 +427,8 @@ async function sendTelegram(message) {
 async function checkTimeframe(pair, tf) {
   const provider = new TwelveDataProvider(pair.apiKey);
   const { PineTS } = require('pinets');
-  const pine = new PineTS(provider, pair.symbol, tf.td, 500);
+  // Pass the Pine-format timeframe to the constructor
+  const pine = new PineTS(provider, pair.symbol, tf.pine, 500);
   const result = await pine.run(PINE_SCRIPT);
 
   const marketData = result.marketData;
@@ -462,8 +475,14 @@ async function checkTimeframe(pair, tf) {
 
 async function runChecks(timeframes) {
   const results = [];
+  let requestCount = 0;
+
   for (const pair of PAIRS) {
     for (const tf of timeframes) {
+      // Rate limit: 8 credits per minute = 1 request every 7.5 seconds
+      if (requestCount > 0) await sleep(8000);
+      requestCount++;
+
       try {
         results.push(await checkTimeframe(pair, tf));
       } catch (e) {
@@ -484,7 +503,6 @@ app.get('/check-slow', async (req, res) => {
   res.json({ success: true, mode: 'slow', checked: await runChecks(SLOW_TIMEFRAMES) });
 });
 
-// Verify that Twelve Data is returning the correct symbols
 app.get('/verify-pairs', async (req, res) => {
   const out = [];
   for (const pair of PAIRS) {
