@@ -5,13 +5,13 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
-// ============================================================
-// CONFIGURATION
-// ============================================================
 const SYMBOL = 'EUR/USD';
 
-// All timeframes to monitor. Twelve Data interval names + display labels.
-const TIMEFRAMES = [
+const FAST_TIMEFRAMES = [
+  { td: '5min', label: '5m' },
+];
+
+const SLOW_TIMEFRAMES = [
   { td: '15min', label: '15m' },
   { td: '45min', label: '45m' },
   { td: '1h',    label: '1H'  },
@@ -20,14 +20,16 @@ const TIMEFRAMES = [
 ];
 
 // ============================================================
-// YOUR PINE SCRIPT v5
+// YOUR PINE SCRIPT v5 — IDENTICAL LOGIC TO TRADINGVIEW
+// (Only the CRT HTF section was rebuilt to work without
+// request.security, which PineTS does not support.)
 // ============================================================
 const PINE_SCRIPT = `
 //@version=5
 strategy("CRT + TBS + Manual + BOS MSS FVG + Trend - Full Strategy", overlay=true, max_labels_count=500, max_lines_count=100, max_boxes_count=100, calc_on_every_tick=false, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=1000000)
 
 //====================================================
-// ENGINE 1 — CRT + TBS
+// ENGINE 1 — CRT + TBS (manual HTF reconstruction)
 //====================================================
 maxBarsToReclaim  = 12
 minBodyPercent    = 0.30
@@ -431,7 +433,6 @@ const SIGNALS = {
   "Trend SELL":         { label: "TREND SELL",           emoji: "🌊" },
 };
 
-// In-memory dedup per timeframe (resets on cold start)
 const alertedBars = {};
 
 async function fetchCandles(symbol, interval, outputsize = 500) {
@@ -465,58 +466,4 @@ async function checkTimeframe(tf) {
   const result = await pine.run(PINE_SCRIPT);
 
   const checkIdx = candles.length - 2;
-  const currentPrice = candles[checkIdx].close;
-  const barTime = new Date(candles[checkIdx].time).toISOString();
-
-  // Dedup per timeframe
-  if (alertedBars[tf.label] === barTime) {
-    return { timeframe: tf.label, skipped: true, bar: barTime };
-  }
-
-  const fired = [];
-  for (const [plotName, meta] of Object.entries(SIGNALS)) {
-    const data = result.plots[plotName]?.data;
-    if (!Array.isArray(data) || data.length < 2) continue;
-    const last = data[checkIdx];
-    const value = (last && typeof last === 'object') ? last.value : last;
-    if (value === true) {
-      fired.push({ signal: meta.label, emoji: meta.emoji });
-    }
-  }
-
-  if (fired.length > 0) {
-    alertedBars[tf.label] = barTime;
-    for (const f of fired) {
-      const msg = `${f.emoji} <b>${f.signal}</b>\n` +
-                  `📊 ${SYMBOL} · <b>${tf.label}</b>\n` +
-                  `💵 Price: ${currentPrice}\n` +
-                  `🕐 Bar: ${barTime}`;
-      await sendTelegram(msg);
-    }
-  }
-
-  return {
-    timeframe: tf.label,
-    bar: barTime,
-    price: currentPrice,
-    signals_fired: fired.length,
-    signals: fired
-  };
-}
-
-app.get('/', (req, res) => res.send('PineTS Bot is running!'));
-
-app.get('/check', async (req, res) => {
-  const results = [];
-  for (const tf of TIMEFRAMES) {
-    try {
-      const r = await checkTimeframe(tf);
-      results.push(r);
-    } catch (e) {
-      results.push({ timeframe: tf.label, error: e.message });
-    }
-  }
-  res.json({ success: true, checked: results });
-});
-
-module.exports = app;
+  
