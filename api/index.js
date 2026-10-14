@@ -5,47 +5,61 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
 
-// --- Test 1: Welcome route ---
-app.get('/', (req, res) => {
-  res.send('PineTS Bot is running!');
-});
+// --- Simple Pine Script test ---
+const TEST_PINE = `
+//@version=5
+indicator("Test")
+ema20 = ta.ema(close, 20)
+plot(ema20, "EMA20")
+`;
 
-// --- Test 2: Verify environment variables are loaded ---
-app.get('/env-check', (req, res) => {
-  res.json({
-    telegram_token_set: !!TELEGRAM_BOT_TOKEN,
-    telegram_chat_set: !!TELEGRAM_CHAT_ID,
-    twelve_data_key_set: !!TWELVE_DATA_API_KEY
-  });
-});
+async function fetchCandles(symbol, interval, outputsize = 100) {
+  const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${TWELVE_DATA_API_KEY}`;
+  const response = await fetch(url);
+  const data = await response.json();
+  if (data.status === 'error') throw new Error(data.message);
+  return data.values.reverse().map(v => ({
+    time: new Date(v.datetime).getTime(),
+    open: parseFloat(v.open),
+    high: parseFloat(v.high),
+    low: parseFloat(v.low),
+    close: parseFloat(v.close),
+    volume: parseFloat(v.volume || 0)
+  }));
+}
 
-// --- Test 3: Send a test message to Telegram ---
-app.get('/test-telegram', async (req, res) => {
+app.get('/', (req, res) => res.send('PineTS Bot is running!'));
+
+app.get('/test-pinets', async (req, res) => {
   try {
-    const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: TELEGRAM_CHAT_ID,
-        text: '✅ Test message from your Vercel bot!',
-        parse_mode: 'HTML'
-      })
-    });
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    res.json({ error: error.message });
-  }
-});
+    const candles = await fetchCandles('EUR/USD', '15min', 100);
+    
+    // Try to import PineTS
+    let PineTS;
+    try {
+      const pinets = require('pinets');
+      PineTS = pinets.PineTS;
+    } catch (e) {
+      return res.json({ 
+        error: 'PineTS import failed', 
+        details: e.message,
+        availableExports: Object.keys(require('pinets'))
+      });
+    }
 
-// --- Test 4: Fetch a candle from Twelve Data ---
-app.get('/test-data', async (req, res) => {
-  try {
-    const url = `https://api.twelvedata.com/time_series?symbol=EUR/USD&interval=15min&outputsize=5&apikey=${TWELVE_DATA_API_KEY}`;
-    const response = await fetch(url);
-    const data = await response.json();
-    res.json(data);
+    // Try to run
+    try {
+      const pine = new PineTS(candles);
+      const result = await pine.run(TEST_PINE);
+      res.json({ 
+        success: true, 
+        candles_count: candles.length,
+        plots: Object.keys(result.plots || {}),
+        lastEMA: result.plots?.EMA20?.data?.slice(-1)[0]
+      });
+    } catch (e) {
+      res.json({ error: 'PineTS run failed', details: e.message, stack: e.stack });
+    }
   } catch (error) {
     res.json({ error: error.message });
   }
