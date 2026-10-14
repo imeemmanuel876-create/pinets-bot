@@ -4,13 +4,14 @@ const app = express();
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
 const TWELVE_DATA_API_KEY = process.env.TWELVE_DATA_API_KEY;
+const TWELVE_DATA_API_KEY_2 = process.env.TWELVE_DATA_API_KEY_2;
 
-const SYMBOL = 'EUR/USD';
-
-const FAST_TIMEFRAMES = [
-  { td: '5min', label: '5m' },
+const PAIRS = [
+  { symbol: 'EUR/USD', label: 'EUR/USD', apiKey: TWELVE_DATA_API_KEY },
+  { symbol: 'EUR/CAD', label: 'EUR/CAD', apiKey: TWELVE_DATA_API_KEY_2 },
 ];
 
+const FAST_TIMEFRAMES = [{ td: '5min', label: '5m' }];
 const SLOW_TIMEFRAMES = [
   { td: '15min', label: '15m' },
   { td: '45min', label: '45m' },
@@ -20,48 +21,77 @@ const SLOW_TIMEFRAMES = [
 ];
 
 // ============================================================
-// YOUR PINE SCRIPT v5 — IDENTICAL LOGIC TO TRADINGVIEW
-// (Only the CRT HTF section was rebuilt to work without
-// request.security, which PineTS does not support.)
+// CUSTOM TWELVE DATA PROVIDER (enables request.security in PineTS)
+// ============================================================
+class TwelveDataProvider {
+  constructor(apiKey) {
+    this.apiKey = apiKey;
+    this.cache = {};
+  }
+
+  mapTimeframe(tf) {
+    const map = {
+      '1': '1min', '5': '5min', '15': '15min', '30': '30min',
+      '45': '45min', '60': '1h', '120': '2h', '240': '4h',
+      '1h': '1h', '2h': '2h', '4h': '4h',
+      '5min': '5min', '15min': '15min', '45min': '45min',
+    };
+    return map[String(tf)] || String(tf);
+  }
+
+  async getMarketData(tickerId, timeframe, limit = 500) {
+    const interval = this.mapTimeframe(timeframe);
+    const cacheKey = `${tickerId}|${interval}|${limit}`;
+    if (this.cache[cacheKey]) return this.cache[cacheKey];
+
+    const url = `https://api.twelvedata.com/time_series?symbol=${tickerId}&interval=${interval}&outputsize=${limit}&apikey=${this.apiKey}&timezone=UTC`;
+    const response = await fetch(url);
+    const data = await response.json();
+    if (data.status === 'error') throw new Error(data.message);
+
+    const candles = data.values.reverse().map(v => ({
+      time: new Date(v.datetime + 'Z').getTime(),
+      open: parseFloat(v.open),
+      high: parseFloat(v.high),
+      low: parseFloat(v.low),
+      close: parseFloat(v.close),
+      volume: parseFloat(v.volume || 0)
+    }));
+
+    this.cache[cacheKey] = candles;
+    return candles;
+  }
+
+  async getSymbolInfo(tickerId) {
+    return {
+      tickerid: tickerId,
+      mintick: 0.00001,
+      pricescale: 100000,
+      pointvalue: 1,
+      mincontract: 1,
+      session: '24x7',
+      timezone: 'UTC'
+    };
+  }
+
+  configure(config) {}
+}
+
+// ============================================================
+// PINE SCRIPT v5 — EXACT ORIGINAL LOGIC, CRT USES request.security
 // ============================================================
 const PINE_SCRIPT = `
 //@version=5
-strategy("CRT + TBS + Manual + BOS MSS FVG + Trend - Full Strategy", overlay=true, max_labels_count=500, max_lines_count=100, max_boxes_count=100, calc_on_every_tick=false, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=1000000)
+strategy("CRT + TBS + Manual + BOS MSS FVG + Trend", overlay=true, max_labels_count=500, max_lines_count=100, max_boxes_count=100, calc_on_every_tick=false, process_orders_on_close=true, default_qty_type=strategy.fixed, default_qty_value=1, initial_capital=1000000)
 
-//====================================================
-// ENGINE 1 — CRT + TBS (manual HTF reconstruction)
-//====================================================
-maxBarsToReclaim  = 12
-minBodyPercent    = 0.30
-showMidpoint      = true
-showCRTSignals    = true
-showSweepMarkers  = true
+// ENGINE 1 — CRT + TBS
+crtTimeframe     = "60"
+maxBarsToReclaim = 12
+minBodyPercent   = 0.30
 
-var float crtHigh = na
-var float crtLow  = na
-var float crtMid  = na
-var int   crtHour = na
-
-currentHour = hour(time)
-
-if na(crtHour) or currentHour != crtHour
-    float prevHigh = na
-    float prevLow  = na
-    int count = 0
-    for i = 1 to 4
-        if i < bar_index
-            prevHigh := na(prevHigh) ? high[i] : math.max(prevHigh, high[i])
-            prevLow  := na(prevLow)  ? low[i]  : math.min(prevLow,  low[i])
-            count += 1
-    if count == 4
-        crtHigh := prevHigh
-        crtLow  := prevLow
-        crtMid  := (crtHigh + crtLow) / 2
-    crtHour := currentHour
-
-plot(crtHigh, "CRT High", color=color.red,  linewidth=2)
-plot(crtLow,  "CRT Low",  color=color.lime, linewidth=2)
-plot(showMidpoint ? crtMid : na, "CRT Mid", color=color.gray, linewidth=1)
+crtHigh = request.security(syminfo.tickerid, crtTimeframe, high[1], lookahead=barmerge.lookahead_on)
+crtLow  = request.security(syminfo.tickerid, crtTimeframe, low[1],  lookahead=barmerge.lookahead_on)
+crtMid  = (crtHigh + crtLow) / 2
 
 crtHighChanged = ta.change(crtHigh)
 crtLowChanged  = ta.change(crtLow)
@@ -85,16 +115,16 @@ if crtBodyBreakBelow
     crtSweepBar   := bar_index
 
 crtBarsSinceSweep = na(crtSweepBar) ? na : bar_index - crtSweepBar
-crtSweepExpired   = crtSweepState != 0 and not na(crtBarsSinceSweep) and crtBarsSinceSweep > maxBarsToReclaim
+crtSweepExpired = crtSweepState != 0 and not na(crtBarsSinceSweep) and crtBarsSinceSweep > maxBarsToReclaim
 if crtSweepExpired
     crtSweepState := 0
     crtSweepBar   := na
 
-crtRange     = high - low
-crtBody      = math.abs(close - open)
-crtBodyPct   = crtRange > 0 ? crtBody / crtRange : 0.0
-crtBullRecl  = close > open and crtBodyPct >= minBodyPercent
-crtBearRecl  = close < open and crtBodyPct >= minBodyPercent
+crtRange   = high - low
+crtBody    = math.abs(close - open)
+crtBodyPct = crtRange > 0 ? crtBody / crtRange : 0.0
+crtBullRecl = close > open and crtBodyPct >= minBodyPercent
+crtBearRecl = close < open and crtBodyPct >= minBodyPercent
 
 crtBullishTBS = crtSweepState == -1 and not na(crtBarsSinceSweep) and crtBarsSinceSweep >= 1 and close > crtLow  and crtBullRecl
 crtBearishTBS = crtSweepState == 1  and not na(crtBarsSinceSweep) and crtBarsSinceSweep >= 1 and close < crtHigh and crtBearRecl
@@ -106,25 +136,17 @@ if crtBuySignal or crtSellSignal
     crtSweepState := 0
     crtSweepBar   := na
 
-plotshape(showSweepMarkers and crtBodyBreakBelow, "CRT Low Sweep",  shape.triangledown, location.belowbar, color.orange, size=size.tiny, text="SWEEP")
-plotshape(showSweepMarkers and crtBodyBreakAbove, "CRT High Sweep", shape.triangleup,   location.abovebar, color.orange, size=size.tiny, text="SWEEP")
-plotshape(showCRTSignals and crtBuySignal,  "CRT BUY",  shape.labelup,   location.belowbar, color.blue,    text="CRT BUY",  textcolor=color.white, size=size.small)
-plotshape(showCRTSignals and crtSellSignal, "CRT SELL", shape.labeldown, location.abovebar, color.fuchsia, text="CRT SELL", textcolor=color.white, size=size.small)
+plotshape(crtBodyBreakBelow, "CRT Low Sweep",  shape.triangledown, location.belowbar, color.orange, size=size.tiny, text="SWEEP")
+plotshape(crtBodyBreakAbove, "CRT High Sweep", shape.triangleup,   location.abovebar, color.orange, size=size.tiny, text="SWEEP")
+plotshape(crtBuySignal,  "CRT BUY",  shape.labelup,   location.belowbar, color.blue,    text="CRT BUY",  textcolor=color.white, size=size.small)
+plotshape(crtSellSignal, "CRT SELL", shape.labeldown, location.abovebar, color.fuchsia, text="CRT SELL", textcolor=color.white, size=size.small)
 
-//====================================================
 // ENGINE 2 — MANUAL TRADING ASSISTANT
-//====================================================
-swingLookback = input.int(12, "Swing Lookback", minval=3)
-emaPeriod     = input.int(200, "Trend EMA Period")
-minBodyPct    = input.float(0.30, "Min Body % (Displacement)")
-minCloseQual  = input.float(0.60, "Min Close Quality")
-atrLength     = input.int(14, "ATR Length")
-slMultiplier  = input.float(1.5, "SL ATR Multiplier", minval=0.5)
-rrRatio       = input.float(1.5, "RR Ratio", minval=1.0)
-showSLTP      = input.bool(true, "Draw SL/TP")
-showLabels    = input.bool(true, "Show Entry Labels")
-useSessionBg  = input.bool(true, "Shade Session")
-sess          = input.session("0700-1000,1200-1600", "Session (UTC)")
+swingLookback = 12
+emaPeriod     = 200
+minBodyPct    = 0.30
+minCloseQual  = 0.60
+atrLength     = 14
 
 ema = ta.ema(close, emaPeriod)
 atr = ta.atr(atrLength)
@@ -142,7 +164,6 @@ bodyPct = rng > 0 ? body / rng : 0.0
 strongMove = bodyPct >= minBodyPct
 closeQualBuy  = rng > 0 ? ((close - low)  / rng) >= minCloseQual : false
 closeQualSell = rng > 0 ? ((high - close) / rng) >= minCloseQual : false
-inSession = not na(time(timeframe.period, sess))
 
 rawBuy  = sweptDn and strongMove and trendUp and close > open and closeQualBuy  and barstate.isconfirmed
 rawSell = sweptUp and strongMove and trendDn and close < open and closeQualSell and barstate.isconfirmed
@@ -154,59 +175,32 @@ manualSellSignal = rawSell and not inCooldown
 if manualBuySignal or manualSellSignal
     lastSig := bar_index
 
-var float slLong  = na
-var float tpLong  = na
-var float slShort = na
-var float tpShort = na
+plotshape(manualBuySignal,  "Manual BUY",  shape.labelup,   location.belowbar, color.green, text="BUY",  textcolor=color.white, size=size.small)
+plotshape(manualSellSignal, "Manual SELL", shape.labeldown, location.abovebar, color.red,   text="SELL", textcolor=color.white, size=size.small)
 
-if manualBuySignal
-    slLong := close - (atr * slMultiplier)
-    tpLong := close + (atr * slMultiplier * rrRatio)
-if manualSellSignal
-    slShort := close + (atr * slMultiplier)
-    tpShort := close - (atr * slMultiplier * rrRatio)
-
-plotshape(showLabels and manualBuySignal,  "Manual BUY",  shape.labelup,   location.belowbar, color.green, text="BUY",  textcolor=color.white, size=size.small)
-plotshape(showLabels and manualSellSignal, "Manual SELL", shape.labeldown, location.abovebar, color.red,   text="SELL", textcolor=color.white, size=size.small)
-
-if showSLTP and manualBuySignal
-    line.new(bar_index, slLong, bar_index + 10, slLong, color=color.red,   style=line.style_dashed)
-    line.new(bar_index, tpLong, bar_index + 10, tpLong, color=color.green, style=line.style_dashed)
-if showSLTP and manualSellSignal
-    line.new(bar_index, slShort, bar_index + 10, slShort, color=color.red,   style=line.style_dashed)
-    line.new(bar_index, tpShort, bar_index + 10, tpShort, color=color.green, style=line.style_dashed)
-
-bgcolor(useSessionBg and inSession ? color.new(color.blue, 80) : na, title="Trade Window")
-
-//====================================================
 // ENGINE 3 — BOS + MSS + FVG
-//====================================================
-structureSwing      = input.int(5, "BOS/MSS Swing Strength", minval=2, maxval=15)
-structureATRLength  = input.int(14, "Structure ATR Length", minval=1)
-minimumFVGATR       = input.float(0.03, "Min FVG × ATR", minval=0.0, step=0.01)
-structureWindow     = input.int(18, "Structure Validity Bars", minval=5, maxval=100)
-fvgRetestWindow     = input.int(12, "FVG Retest Window", minval=3, maxval=50)
-retestBodyPercent   = input.float(0.35, "Retest Body %", minval=0.10, maxval=1.0, step=0.05)
-structureCooldown   = input.int(3, "Structure Cooldown", minval=1, maxval=20)
+structureSwing     = 5
+structureATRLength = 14
+minimumFVGATR      = 0.03
+structureWindow    = 18
+fvgRetestWindow    = 12
+retestBodyPercent  = 0.35
+structureCooldown  = 3
 
 structureATR = ta.atr(structureATRLength)
-structPivotH = ta.pivothigh(high, structureSwing, structureSwing)
-structPivotL = ta.pivotlow(low,   structureSwing, structureSwing)
+structurePivotHigh = ta.pivothigh(high, structureSwing, structureSwing)
+structurePivotLow  = ta.pivotlow(low,   structureSwing, structureSwing)
 
-var float structureHigh   = na
-var float structureLow    = na
-var int   structureHighBar = na
-var int   structureLowBar  = na
+var float structureHigh = na
+var float structureLow  = na
 var bool  highAlreadyBroken = false
 var bool  lowAlreadyBroken  = false
 
-if not na(structPivotH)
-    structureHigh := structPivotH
-    structureHighBar := bar_index - structureSwing
+if not na(structurePivotHigh)
+    structureHigh := structurePivotHigh
     highAlreadyBroken := false
-if not na(structPivotL)
-    structureLow := structPivotL
-    structureLowBar := bar_index - structureSwing
+if not na(structurePivotLow)
+    structureLow := structurePivotLow
     lowAlreadyBroken := false
 
 bullishBreak = not na(structureHigh) and close > structureHigh and not highAlreadyBroken
@@ -228,8 +222,8 @@ if bullishBreak
 if bearishBreak
     marketDirection := -1
 
-var int bullishStructureBar  = na
-var int bearishStructureBar  = na
+var int bullishStructureBar = na
+var int bearishStructureBar = na
 if bullishBOS or bullishMSS
     bullishStructureBar := bar_index
 if bearishBOS or bearishMSS
@@ -243,58 +237,41 @@ bearishFVG = high < low[2]  and (low[2] - high)   >= structureATR * minimumFVGAT
 
 var float bullFVGTop = na
 var float bullFVGBottom = na
-var int   bullFVGBar = na
 var bool  bullFVGActive = false
-
 if bullishFVG and bullishStructureActive
     bullFVGTop := low
     bullFVGBottom := high[2]
-    bullFVGBar := bar_index
     bullFVGActive := true
 
 var float bearFVGTop = na
 var float bearFVGBottom = na
-var int   bearFVGBar = na
 var bool  bearFVGActive = false
-
 if bearishFVG and bearishStructureActive
     bearFVGTop := low[2]
     bearFVGBottom := high
-    bearFVGBar := bar_index
     bearFVGActive := true
 
-if bullFVGActive and not na(bullFVGBar) and bar_index - bullFVGBar > fvgRetestWindow
-    bullFVGActive := false
-if bearFVGActive and not na(bearFVGBar) and bar_index - bearFVGBar > fvgRetestWindow
-    bearFVGActive := false
-
-bullishRetest = bullFVGActive and bar_index > bullFVGBar and low  <= bullFVGTop    and high >= bullFVGBottom
-bearishRetest = bearFVGActive and bar_index > bearFVGBar and high >= bearFVGBottom and low  <= bearFVGTop
+bullishRetest = bullFVGActive and low  <= bullFVGTop    and high >= bullFVGBottom
+bearishRetest = bearFVGActive and high >= bearFVGBottom and low  <= bearFVGTop
 
 retestRange = high - low
 retestBody  = math.abs(close - open)
 retestBodyPct = retestRange > 0 ? retestBody / retestRange : 0.0
-goodBullRetest = close > open and retestBodyPct >= retestBodyPercent
-goodBearRetest = close < open and retestBodyPct >= retestBodyPercent
+goodBullishRetestCandle = close > open and retestBodyPct >= retestBodyPercent
+goodBearishRetestCandle = close < open and retestBodyPct >= retestBodyPercent
 
-bullRetestConf = bullishRetest and goodBullRetest and close > bullFVGBottom
-bearRetestConf = bearishRetest and goodBearRetest and close < bearFVGTop
+bullishRetestConfirmation = bullishRetest and goodBullishRetestCandle and close > bullFVGBottom
+bearishRetestConfirmation = bearishRetest and goodBearishRetestCandle and close < bearFVGTop
 
-structureBuyRaw  = bullRetestConf and marketDirection ==  1 and barstate.isconfirmed
-structureSellRaw = bearRetestConf and marketDirection == -1 and barstate.isconfirmed
+structureBuyRaw  = bullishRetestConfirmation and marketDirection ==  1 and barstate.isconfirmed
+structureSellRaw = bearishRetestConfirmation and marketDirection == -1 and barstate.isconfirmed
 
 var int lastStructureSignal = na
-structCooldownActive = not na(lastStructureSignal) and bar_index - lastStructureSignal <= structureCooldown
-
-structureBuySignal  = structureBuyRaw  and not structCooldownActive
-structureSellSignal = structureSellRaw and not structCooldownActive
-
+structureCooldownActive = not na(lastStructureSignal) and bar_index - lastStructureSignal <= structureCooldown
+structureBuySignal  = structureBuyRaw  and not structureCooldownActive
+structureSellSignal = structureSellRaw and not structureCooldownActive
 if structureBuySignal or structureSellSignal
     lastStructureSignal := bar_index
-if structureBuySignal
-    bullFVGActive := false
-if structureSellSignal
-    bearFVGActive := false
 
 plotshape(bullishBOS, "Bullish BOS", shape.labelup,   location.belowbar, color.blue,   text="BOS", textcolor=color.white, size=size.tiny)
 plotshape(bearishBOS, "Bearish BOS", shape.labeldown, location.abovebar, color.red,    text="BOS", textcolor=color.white, size=size.tiny)
@@ -305,19 +282,17 @@ plotshape(bearishFVG, "Bearish FVG", shape.labeldown, location.abovebar, color.r
 plotshape(structureBuySignal,  "BOS MSS FVG BUY",  shape.labelup,   location.belowbar, color.purple, text="BUY",  textcolor=color.white, size=size.small)
 plotshape(structureSellSignal, "BOS MSS FVG SELL", shape.labeldown, location.abovebar, color.orange, text="SELL", textcolor=color.white, size=size.small)
 
-//====================================================
-// ENGINE 4 — TREND CHANGE / LIQUIDITY
-//====================================================
-tcSwingLength      = input.int(4,  "Trend Swing Strength", minval=2, maxval=10)
-tcLiquidityLookback= input.int(12, "Liquidity Lookback", minval=5, maxval=30)
-tcFastEMA          = input.int(20, "Trend Fast EMA", minval=5, maxval=100)
-tcMidEMA           = input.int(50, "Trend Mid EMA", minval=10, maxval=200)
-tcSlowEMA          = input.int(200,"Trend Slow EMA", minval=50, maxval=500)
-tcATRLength        = input.int(14, "Trend ATR", minval=1)
-tcLiquidityBuffer  = input.float(0.05, "Liquidity Buffer × ATR", minval=0.0, step=0.01)
-tcConfirmationBars = input.int(2, "Trend Confirmation Bars", minval=1, maxval=4)
-tcLiquidityWindow  = input.int(10, "Liquidity Validity Bars", minval=2, maxval=30)
-tcCooldown         = input.int(5, "Trend Signal Cooldown", minval=1, maxval=30)
+// ENGINE 4 — TREND CHANGE
+tcSwingLength      = 4
+tcLiquidityLookback= 12
+tcFastEMA          = 20
+tcMidEMA           = 50
+tcSlowEMA          = 200
+tcATRLength        = 14
+tcLiquidityBuffer  = 0.05
+tcConfirmationBars = 2
+tcLiquidityWindow  = 10
+tcCooldown         = 5
 
 tcEMA20  = ta.ema(close, tcFastEMA)
 tcEMA50  = ta.ema(close, tcMidEMA)
@@ -325,74 +300,67 @@ tcEMA200 = ta.ema(close, tcSlowEMA)
 tcATR    = ta.atr(tcATRLength)
 tcBuffer = tcATR * tcLiquidityBuffer
 
-tcPivotH = ta.pivothigh(high, tcSwingLength, tcSwingLength)
-tcPivotL = ta.pivotlow(low,   tcSwingLength, tcSwingLength)
+tcPivotHigh = ta.pivothigh(high, tcSwingLength, tcSwingLength)
+tcPivotLow  = ta.pivotlow(low,   tcSwingLength, tcSwingLength)
 
 var float tcSwingHigh = na
-var float tcSwingLow = na
-var int   tcSwingHighBar = na
-var int   tcSwingLowBar = na
-
-if not na(tcPivotH)
-    tcSwingHigh := tcPivotH
-    tcSwingHighBar := bar_index - tcSwingLength
-if not na(tcPivotL)
-    tcSwingLow := tcPivotL
-    tcSwingLowBar := bar_index - tcSwingLength
+var float tcSwingLow  = na
+if not na(tcPivotHigh)
+    tcSwingHigh := tcPivotHigh
+if not na(tcPivotLow)
+    tcSwingLow := tcPivotLow
 
 tcRecentHigh = ta.highest(high, tcLiquidityLookback)[1]
 tcRecentLow  = ta.lowest(low,   tcLiquidityLookback)[1]
 
-tcBullSweep = not na(tcRecentLow)  and low  < tcRecentLow  - tcBuffer and close > tcRecentLow
-tcBearSweep = not na(tcRecentHigh) and high > tcRecentHigh + tcBuffer and close < tcRecentHigh
+tcBullishLiquiditySweep = not na(tcRecentLow)  and low  < tcRecentLow  - tcBuffer and close > tcRecentLow
+tcBearishLiquiditySweep = not na(tcRecentHigh) and high > tcRecentHigh + tcBuffer and close < tcRecentHigh
 
 var int tcBullSweepBar = na
 var int tcBearSweepBar = na
-
-if tcBullSweep
+if tcBullishLiquiditySweep
     tcBullSweepBar := bar_index
-if tcBearSweep
+if tcBearishLiquiditySweep
     tcBearSweepBar := bar_index
 
-tcBullLiqActive = not na(tcBullSweepBar) and bar_index - tcBullSweepBar <= tcLiquidityWindow
-tcBearLiqActive = not na(tcBearSweepBar) and bar_index - tcBearSweepBar <= tcLiquidityWindow
+tcBullLiquidityActive = not na(tcBullSweepBar) and bar_index - tcBullSweepBar <= tcLiquidityWindow
+tcBearLiquidityActive = not na(tcBearSweepBar) and bar_index - tcBearSweepBar <= tcLiquidityWindow
 
 if not na(tcBullSweepBar) and bar_index - tcBullSweepBar > tcLiquidityWindow
     tcBullSweepBar := na
 if not na(tcBearSweepBar) and bar_index - tcBearSweepBar > tcLiquidityWindow
     tcBearSweepBar := na
 
+var int tcTrendState = 0
 tcBullTrend = close > tcEMA50 + tcBuffer and tcEMA20 > tcEMA50 and tcEMA50 > tcEMA200
 tcBearTrend = close < tcEMA50 - tcBuffer and tcEMA20 < tcEMA50 and tcEMA50 < tcEMA200
-
-var int tcTrendState = 0
 if tcBullTrend
     tcTrendState := 1
 if tcBearTrend
     tcTrendState := -1
 
-tcBullStructBreak = tcBullLiqActive and not na(tcSwingHigh) and close > tcSwingHigh
-tcBearStructBreak = tcBearLiqActive and not na(tcSwingLow)  and close < tcSwingLow
+tcBullishStructureBreak = tcBullLiquidityActive and not na(tcSwingHigh) and close > tcSwingHigh
+tcBearishStructureBreak = tcBearLiquidityActive and not na(tcSwingLow)  and close < tcSwingLow
 
-tcBullMom = 0
-tcBearMom = 0
+tcBullMomentum = 0
+tcBearMomentum = 0
 for i = 0 to tcConfirmationBars - 1
     if close[i] > tcEMA20[i]
-        tcBullMom += 1
+        tcBullMomentum += 1
     if close[i] < tcEMA20[i]
-        tcBearMom += 1
+        tcBearMomentum += 1
 
-tcBullConf = tcBullMom >= tcConfirmationBars
-tcBearConf = tcBearMom >= tcConfirmationBars
+tcBullConfirmed = tcBullMomentum >= tcConfirmationBars
+tcBearConfirmed = tcBearMomentum >= tcConfirmationBars
 
 tcRange = high - low
 tcBody  = math.abs(close - open)
-tcBodyPct = tcRange > 0 ? tcBody / tcRange : 0.0
-tcBullCandle = close > open and tcBodyPct >= 0.35
-tcBearCandle = close < open and tcBodyPct >= 0.35
+tcBodyPercent = tcRange > 0 ? tcBody / tcRange : 0.0
+tcBullCandle = close > open and tcBodyPercent >= 0.35
+tcBearCandle = close < open and tcBodyPercent >= 0.35
 
-tcBullishTrendChange = tcTrendState == -1 and tcBullStructBreak and tcBullConf and tcBullCandle and close > tcEMA20 and barstate.isconfirmed
-tcBearishTrendChange = tcTrendState ==  1 and tcBearStructBreak and tcBearConf and tcBearCandle and close < tcEMA20 and barstate.isconfirmed
+tcBullishTrendChange = tcTrendState == -1 and tcBullishStructureBreak and tcBullConfirmed and tcBullCandle and close > tcEMA20 and barstate.isconfirmed
+tcBearishTrendChange = tcTrendState ==  1 and tcBearishStructureBreak and tcBearConfirmed and tcBearCandle and close < tcEMA20 and barstate.isconfirmed
 
 var int tcLastSignalBar = na
 tcCooldownActive = not na(tcLastSignalBar) and bar_index - tcLastSignalBar <= tcCooldown
@@ -407,48 +375,33 @@ if tcTrendBuySignal
 if tcTrendSellSignal
     tcBearSweepBar := na
 
-plotshape(tcBullSweep, "Liq Bull Sweep", shape.labelup, location.belowbar, color=color.new(color.green, 0), text="LIQ BULL", textcolor=color.white, size=size.small)
-plotshape(tcBearSweep, "Liq Bear Sweep", shape.labeldown, location.abovebar, color=color.new(color.red, 0), text="LIQ BEAR", textcolor=color.white, size=size.small)
+plotshape(tcBullishLiquiditySweep, "Liq Bull Sweep", shape.labelup, location.belowbar, color=color.new(color.green, 0), text="LIQ BULL", textcolor=color.white, size=size.small)
+plotshape(tcBearishLiquiditySweep, "Liq Bear Sweep", shape.labeldown, location.abovebar, color=color.new(color.red, 0), text="LIQ BEAR", textcolor=color.white, size=size.small)
 plotshape(tcTrendBuySignal,  "Trend BUY",  shape.labelup,   location.belowbar, color.yellow, text="TREND BUY",  textcolor=color.black, size=size.small)
 plotshape(tcTrendSellSignal, "Trend SELL", shape.labeldown, location.abovebar, color.aqua,   text="TREND SELL", textcolor=color.black, size=size.small)
 `;
 // ============================================================
 
 const SIGNALS = {
-  "CRT BUY":            { label: "CRT BUY",              emoji: "🟦" },
-  "CRT SELL":           { label: "CRT SELL",             emoji: "🟪" },
-  "Manual BUY":         { label: "MANUAL BUY",           emoji: "🟢" },
-  "Manual SELL":        { label: "MANUAL SELL",          emoji: "🔴" },
-  "Bullish BOS":        { label: "BOS BULLISH",          emoji: "🔵" },
-  "Bearish BOS":        { label: "BOS BEARISH",          emoji: "🔻" },
-  "Bullish MSS":        { label: "MSS BULLISH",          emoji: "🩵" },
-  "Bearish MSS":        { label: "MSS BEARISH",          emoji: "🟠" },
-  "Bullish FVG":        { label: "FVG BULLISH",          emoji: "📘" },
-  "Bearish FVG":        { label: "FVG BEARISH",          emoji: "📕" },
-  "BOS MSS FVG BUY":    { label: "STRUCTURE BUY",        emoji: "🟣" },
-  "BOS MSS FVG SELL":   { label: "STRUCTURE SELL",       emoji: "🟠" },
-  "Liq Bull Sweep":     { label: "LIQUIDITY BULL SWEEP", emoji: "💧" },
-  "Liq Bear Sweep":     { label: "LIQUIDITY BEAR SWEEP", emoji: "💧" },
-  "Trend BUY":          { label: "TREND BUY",            emoji: "🟡" },
-  "Trend SELL":         { label: "TREND SELL",           emoji: "🌊" },
+  "CRT BUY":          { label: "CRT BUY",              emoji: "🟦" },
+  "CRT SELL":         { label: "CRT SELL",             emoji: "🟪" },
+  "Manual BUY":       { label: "MANUAL BUY",           emoji: "🟢" },
+  "Manual SELL":      { label: "MANUAL SELL",          emoji: "🔴" },
+  "Bullish BOS":      { label: "BOS BULLISH",          emoji: "🔵" },
+  "Bearish BOS":      { label: "BOS BEARISH",          emoji: "🔻" },
+  "Bullish MSS":      { label: "MSS BULLISH",          emoji: "🩵" },
+  "Bearish MSS":      { label: "MSS BEARISH",          emoji: "🟠" },
+  "Bullish FVG":      { label: "FVG BULLISH",          emoji: "📘" },
+  "Bearish FVG":      { label: "FVG BEARISH",          emoji: "📕" },
+  "BOS MSS FVG BUY":  { label: "STRUCTURE BUY",        emoji: "🟣" },
+  "BOS MSS FVG SELL": { label: "STRUCTURE SELL",       emoji: "🟠" },
+  "Liq Bull Sweep":   { label: "LIQUIDITY BULL SWEEP", emoji: "💧" },
+  "Liq Bear Sweep":   { label: "LIQUIDITY BEAR SWEEP", emoji: "💧" },
+  "Trend BUY":        { label: "TREND BUY",            emoji: "🟡" },
+  "Trend SELL":       { label: "TREND SELL",           emoji: "🌊" },
 };
 
 const alertedBars = {};
-
-async function fetchCandles(symbol, interval, outputsize = 500) {
-  const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=${outputsize}&apikey=${TWELVE_DATA_API_KEY}`;
-  const response = await fetch(url);
-  const data = await response.json();
-  if (data.status === 'error') throw new Error(data.message);
-  return data.values.reverse().map(v => ({
-    time: new Date(v.datetime).getTime(),
-    open: parseFloat(v.open),
-    high: parseFloat(v.high),
-    low: parseFloat(v.low),
-    close: parseFloat(v.close),
-    volume: parseFloat(v.volume || 0)
-  }));
-}
 
 async function sendTelegram(message) {
   const url = `https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`;
@@ -459,18 +412,20 @@ async function sendTelegram(message) {
   });
 }
 
-async function checkTimeframe(tf) {
-  const candles = await fetchCandles(SYMBOL, tf.td, 500);
+async function checkTimeframe(pair, tf) {
+  const provider = new TwelveDataProvider(pair.apiKey);
   const { PineTS } = require('pinets');
-  const pine = new PineTS(candles);
+  const pine = new PineTS(provider, pair.symbol, tf.td, 500);
   const result = await pine.run(PINE_SCRIPT);
 
-  const checkIdx = candles.length - 2;
-  const currentPrice = candles[checkIdx].close;
-  const barTime = new Date(candles[checkIdx].time).toISOString();
+  const marketData = result.marketData;
+  const checkIdx = marketData.length - 2;
+  const currentPrice = marketData[checkIdx].close;
+  const barTime = new Date(marketData[checkIdx].time).toISOString();
 
-  if (alertedBars[tf.label] === barTime) {
-    return { timeframe: tf.label, skipped: true, bar: barTime };
+  const cacheKey = `${pair.label}_${tf.label}`;
+  if (alertedBars[cacheKey] === barTime) {
+    return { pair: pair.label, timeframe: tf.label, skipped: true, bar: barTime };
   }
 
   const fired = [];
@@ -485,10 +440,10 @@ async function checkTimeframe(tf) {
   }
 
   if (fired.length > 0) {
-    alertedBars[tf.label] = barTime;
+    alertedBars[cacheKey] = barTime;
     for (const f of fired) {
       const msg = `${f.emoji} <b>${f.signal}</b>\n` +
-                  `📊 ${SYMBOL} · <b>${tf.label}</b>\n` +
+                  `📊 ${pair.label} · <b>${tf.label}</b>\n` +
                   `💵 Price: ${currentPrice}\n` +
                   `🕐 Bar: ${barTime}`;
       await sendTelegram(msg);
@@ -496,6 +451,7 @@ async function checkTimeframe(tf) {
   }
 
   return {
+    pair: pair.label,
     timeframe: tf.label,
     bar: barTime,
     price: currentPrice,
@@ -506,12 +462,13 @@ async function checkTimeframe(tf) {
 
 async function runChecks(timeframes) {
   const results = [];
-  for (const tf of timeframes) {
-    try {
-      const r = await checkTimeframe(tf);
-      results.push(r);
-    } catch (e) {
-      results.push({ timeframe: tf.label, error: e.message });
+  for (const pair of PAIRS) {
+    for (const tf of timeframes) {
+      try {
+        results.push(await checkTimeframe(pair, tf));
+      } catch (e) {
+        results.push({ pair: pair.label, timeframe: tf.label, error: e.message });
+      }
     }
   }
   return results;
@@ -520,20 +477,32 @@ async function runChecks(timeframes) {
 app.get('/', (req, res) => res.send('PineTS Bot is running!'));
 
 app.get('/check-fast', async (req, res) => {
-  const results = await runChecks(FAST_TIMEFRAMES);
-  res.json({ success: true, mode: 'fast', checked: results });
+  res.json({ success: true, mode: 'fast', checked: await runChecks(FAST_TIMEFRAMES) });
 });
 
 app.get('/check-slow', async (req, res) => {
-  const results = await runChecks(SLOW_TIMEFRAMES);
-  res.json({ success: true, mode: 'slow', checked: results });
+  res.json({ success: true, mode: 'slow', checked: await runChecks(SLOW_TIMEFRAMES) });
 });
 
-app.get('/check', async (req, res) => {
-  const all = [...FAST_TIMEFRAMES, ...SLOW_TIMEFRAMES];
-  const results = await runChecks(all);
-  res.json({ success: true, mode: 'all', checked: results });
+// Verify that Twelve Data is returning the correct symbols
+app.get('/verify-pairs', async (req, res) => {
+  const out = [];
+  for (const pair of PAIRS) {
+    try {
+      const url = `https://api.twelvedata.com/time_series?symbol=${pair.symbol}&interval=15min&outputsize=3&apikey=${pair.apiKey}&timezone=UTC`;
+      const r = await fetch(url);
+      const d = await r.json();
+      out.push({
+        requested: pair.label,
+        twelveDataReturned: d.meta?.symbol || 'unknown',
+        match: pair.symbol === (d.meta?.symbol || ''),
+        latestClose: d.values?.[0]?.close
+      });
+    } catch (e) {
+      out.push({ requested: pair.label, error: e.message });
+    }
+  }
+  res.json(out);
 });
 
 module.exports = app;
-  
