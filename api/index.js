@@ -342,7 +342,6 @@ async function checkPair(pair, timeframes) {
 
   for (let i = 0; i < timeframes.length; i++) {
     const tf = timeframes[i];
-    if (i > 0) await sleep(8000);
 
     try {
       const pine = new PineTS(provider, pair.symbol, tf.pine, 500);
